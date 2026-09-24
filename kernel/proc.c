@@ -109,6 +109,7 @@ found:
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+    printf("DEBUG: allocproc trapframe kalloc failed\n");
     release(&p->lock);
     return 0;
   }
