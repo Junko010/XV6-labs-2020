@@ -20,6 +20,7 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+extern pagetable_t kernel_pagetable;
 
 // initialize the proc table at boot time.
 void
@@ -114,12 +115,26 @@ found:
   }
 
   // An empty user page table.
-  p->pagetable = proc_pagetable(p);
-  if(p->pagetable == 0){
-    freeproc(p);
-    release(&p->lock);
-    return 0;
-  }
+ // 初始化内核页表指针。
+p->kernelpt = 0;
+
+// 创建用户页表。
+p->pagetable = proc_pagetable(p);
+
+if(p->pagetable == 0){
+  freeproc(p);
+  release(&p->lock);
+  return 0;
+}
+
+// 创建进程独立内核页表。
+p->kernelpt = clone_kernel_pagetable();
+
+if(p->kernelpt == 0){
+  freeproc(p);
+  release(&p->lock);
+  return 0;
+}
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -140,8 +155,15 @@ freeproc(struct proc *p)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
-  p->pagetable = 0;
+  proc_freepagetable(p->pagetable, p->sz);
+
+p->pagetable = 0;
+
+// 释放进程独立内核页表。
+if(p->kernelpt)
+  free_kernel_pagetable(p->kernelpt);
+
+p->kernelpt = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -220,7 +242,7 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
-
+  u2kvmcopy(p->pagetable, p->kernelpt, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -238,18 +260,41 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint64 oldsz;
+  uint64 newsz;
   struct proc *p = myproc();
 
-  sz = p->sz;
+  oldsz = p->sz;
+  newsz = oldsz;
+
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+
+    if(PGROUNDUP(oldsz + n) >= PLIC)
       return -1;
-    }
+
+    newsz = uvmalloc(p->pagetable, oldsz, oldsz + n);
+
+    if(newsz == 0)
+      return -1;
+
+    // 同步新增的用户页面。
+    u2kvmcopy(p->pagetable, p->kernelpt, oldsz, newsz);
+
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+
+    newsz = uvmdealloc(p->pagetable, oldsz, oldsz + n);
+
+    // 删除内核页表中已经释放的用户页面映射。
+    uint64 start = PGROUNDUP(newsz);
+    uint64 end = PGROUNDUP(oldsz);
+
+    if(end > start)
+      uvmunmap(p->kernelpt, start,
+               (end - start) / PGSIZE, 0);
   }
-  p->sz = sz;
+
+  p->sz = newsz;
+
   return 0;
 }
 
@@ -274,7 +319,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
-
+ u2kvmcopy(np->pagetable, np->kernelpt, 0, np->sz);
   np->parent = p;
 
   // copy saved user registers.
@@ -471,13 +516,24 @@ scheduler(void)
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+p->state = RUNNING;
+c->proc = p;
+
+// 切换到当前进程的独立内核页表。
+w_satp(MAKE_SATP(p->kernelpt));
+sfence_vma();
+
+swtch(&c->context, &p->context);
+
+// 进程让出 CPU 后，切回全局内核页表。
+w_satp(MAKE_SATP(kernel_pagetable));
+sfence_vma();
+
+c->proc = 0;
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
-        c->proc = 0;
+       
 
         found = 1;
       }

@@ -175,10 +175,12 @@ void            uvmfree(pagetable_t, uint64);
 void            uvmunmap(pagetable_t, uint64, uint64, int);
 void            uvmclear(pagetable_t, uint64);
 uint64          walkaddr(pagetable_t, uint64);
+void u2kvmcopy(pagetable_t pagetable, pagetable_t kernelpt, uint64 oldsz, uint64 newsz);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-
+pagetable_t clone_kernel_pagetable(void);
+void free_kernel_pagetable(pagetable_t pagetable);
 // plic.c
 void            plicinit(void);
 void            plicinithart(void);
@@ -223,3 +225,8 @@ int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
 #endif
+//vmcopyin.c
+int             
+copyin_new(pagetable_t, char *, uint64, uint64); 
+int             
+copyinstr_new(pagetable_t, char *, uint64, uint64); 

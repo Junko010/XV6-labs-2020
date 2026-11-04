@@ -55,7 +55,94 @@ kvminithart()
   w_satp(MAKE_SATP(kernel_pagetable));
   sfence_vma();
 }
+// 递归复制页表结构。
+// 中间级页表重新分配，叶子 PTE 复制原有映射。
+// 不复制叶子映射所指向的物理内存。
+static int
+copy_kernel_pagetable_level(pagetable_t src,
+                            pagetable_t dst,
+                            int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = src[i];
 
+    if((pte & PTE_V) == 0)
+      continue;
+
+    // 叶子 PTE：直接复制映射。
+    if(pte & (PTE_R | PTE_W | PTE_X)){
+      dst[i] = pte;
+    } else {
+      // 非叶子 PTE：分配新的下级页表。
+      if(level == 0)
+        return -1;
+
+      pagetable_t child = (pagetable_t)kalloc();
+      if(child == 0)
+        return -1;
+
+      memset(child, 0, PGSIZE);
+      dst[i] = PA2PTE(child) | PTE_V;
+
+      if(copy_kernel_pagetable_level(
+           (pagetable_t)PTE2PA(pte), child, level - 1) < 0)
+        return -1;
+    }
+  }
+
+  return 0;
+}
+
+// 为进程创建独立内核页表。
+pagetable_t
+clone_kernel_pagetable(void)
+{
+  pagetable_t newpt = uvmcreate();
+
+  if(newpt == 0)
+    return 0;
+
+  if(copy_kernel_pagetable_level(
+       kernel_pagetable, newpt, 2) < 0){
+
+    free_kernel_pagetable(newpt);
+    return 0;
+  }
+
+  return newpt;
+}
+// 递归释放页表结构，不释放叶子映射对应的物理内存。
+static void
+free_kernel_pagetable_level(pagetable_t pagetable, int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+
+    if((pte & PTE_V) == 0)
+      continue;
+
+    // 叶子映射对应的物理页面不能释放。
+    if(pte & (PTE_R | PTE_W | PTE_X))
+      continue;
+
+    if(level > 0){
+      pagetable_t child = (pagetable_t)PTE2PA(pte);
+      free_kernel_pagetable_level(child, level - 1);
+      kfree((void *)child);
+    }
+  }
+}
+
+// 释放进程的独立内核页表。
+void
+free_kernel_pagetable(pagetable_t pagetable)
+{
+  if(pagetable == 0)
+    return;
+
+  free_kernel_pagetable_level(pagetable, 2);
+  kfree((void *)pagetable);
+}
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -379,23 +466,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+ return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -405,38 +476,37 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
-
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
+   return copyinstr_new(pagetable, dst, srcva, max);
   }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
+void
+u2kvmcopy(pagetable_t pagetable,
+          pagetable_t kernelpt,
+          uint64 oldsz,
+          uint64 newsz)
+{
+  pte_t *pte_from, *pte_to;
+
+  if(pagetable == 0 || kernelpt == 0)
+    panic("u2kvmcopy: null pagetable");
+
+  oldsz = PGROUNDUP(oldsz);
+
+  for(uint64 i = oldsz; i < newsz; i += PGSIZE){
+
+    pte_from = walk(pagetable, i, 0);
+
+    if(pte_from == 0 || (*pte_from & PTE_V) == 0)
+      panic("u2kvmcopy: invalid source pte");
+
+    pte_to = walk(kernelpt, i, 1);
+
+    if(pte_to == 0)
+      panic("u2kvmcopy: kernel pte walk failed");
+
+    uint64 pa = PTE2PA(*pte_from);
+    uint64 flags = PTE_FLAGS(*pte_from) & (~PTE_U);
+
+    *pte_to = PA2PTE(pa) | flags;
   }
 }
