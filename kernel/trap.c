@@ -77,9 +77,26 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+ if(which_dev == 2) {
+  if(p->alarm_interval > 0 && !p->is_alarming) {
+    p->ticks_count++;
 
+    if(p->ticks_count >= p->alarm_interval) {
+      // Reset tick counter.
+      p->ticks_count = 0;
+
+      // Save the current user register state.
+      *p->alarm_trapframe = *p->trapframe;
+
+      // Redirect execution to the alarm handler.
+      p->trapframe->epc = p->alarm_handler;
+
+      // Prevent reentrant alarm calls.
+      p->is_alarming = 1;
+    }
+  }
+    yield();
+  }
   usertrapret();
 }
 
@@ -217,4 +234,3 @@ devintr()
     return 0;
   }
 }
-

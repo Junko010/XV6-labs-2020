@@ -104,6 +104,8 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_wait(void);
 extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
+extern uint64 sys_sigalarm(void);
+extern uint64 sys_sigreturn(void);
 
 static uint64 (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -127,6 +129,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_sigalarm]  sys_sigalarm,
+[SYS_sigreturn] sys_sigreturn,
 };
 
 void
@@ -143,4 +147,37 @@ syscall(void)
             p->pid, p->name, num);
     p->trapframe->a0 = -1;
   }
+}
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+
+  *p->trapframe = *p->alarm_trapframe;
+  p->is_alarming = 0;
+
+  return p->trapframe->a0;
+}
+uint64
+sys_sigalarm(void)
+{
+  int interval;
+  uint64 handler;
+
+  if(argint(0, &interval) < 0)
+    return -1;
+
+  if(argaddr(1, &handler) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+
+  p->alarm_interval = interval;
+  p->alarm_handler = handler;
+  p->ticks_count = 0;
+
+  if(interval == 0)
+    p->is_alarming = 0;
+
+  return 0;
 }
