@@ -120,7 +120,9 @@ panic(char *s)
   pr.locking = 0;
   printf("panic: ");
   printf(s);
+  backtrace();
   printf("\n");
+  
   panicked = 1; // freeze uart output from other CPUs
   for(;;)
     ;
@@ -131,4 +133,15 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+void
+backtrace(void)
+{  printf("backtrace:\n");
+  uint64 fp = r_fp(); // Get the current frame pointer 读取当前帧指针
+  
+  while (PGROUNDUP(fp) - PGROUNDDOWN(fp) == PGSIZE) { //  检查帧指针是否有效
+    uint64 ret_addr = *(uint64 *)(fp - 8); // - 8 保存的帧指针存储在fp - 8
+    printf("   %p\n", ret_addr); // 打印返回地址
+    fp = *(uint64*)(fp-16); // 移动到上一个帧指针
+  }
 }
