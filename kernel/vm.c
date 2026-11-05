@@ -5,7 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
-
+#include "spinlock.h"
+#include "proc.h"
 /*
  * the kernel's page table.
  */
@@ -87,7 +88,50 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   }
   return &pagetable[PX(0, va)];
 }
+int
+lazyalloc(struct proc *p, uint64 va)
+{
+  char *mem;
+  pte_t *pte;
 
+  va = PGROUNDDOWN(va);
+
+  if(va >= p->sz || va >= MAXVA) {
+    
+    return -1;
+  }
+
+  pte = walk(p->pagetable, va, 0);
+
+  // 页面已经存在
+  if(pte != 0 && (*pte & PTE_V)) {
+    if((*pte & PTE_U) == 0) {
+      printf("lazyalloc: guard page va=%p, pte=%p\n", va, *pte);
+      return -1;
+    }
+
+    return 0;
+  }
+
+  // 分配物理页面
+  mem = kalloc();
+  if(mem == 0) {
+    printf("lazyalloc: kalloc failed, va=%p\n", va);
+    return -1;
+  }
+
+  memset(mem, 0, PGSIZE);
+
+  // 建立页表映射
+  if(mappages(p->pagetable, va, PGSIZE,
+              (uint64)mem, PTE_R | PTE_W | PTE_U) != 0) {
+    printf("lazyalloc: mappages failed, va=%p\n", va);
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -181,9 +225,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -313,11 +357,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint flags;
   char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+   for(i = 0; i < sz; i += PGSIZE){ 
+    if((pte = walk(old, i, 0)) == 0) 
+      continue; 
+    if((*pte & PTE_V) == 0) 
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -358,9 +402,18 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+   pa0 = walkaddr(pagetable, va0);
+
+if(pa0 == 0) {
+  struct proc *p = myproc();
+
+  if(lazyalloc(p, va0) < 0)
+    return -1;
+
+  pa0 = walkaddr(pagetable, va0);
+  if(pa0 == 0)
+    return -1;
+}
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -383,9 +436,28 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+
+   pa0 = walkaddr(pagetable, va0);
+   if(pa0 == 0) {
+  pte_t *pte = walk(pagetable, va0, 0);
+
+  if(pte != 0)
+    printf("copyin: invalid mapping va=%p pte=%p\n",
+           va0, *pte);
+  else
+    printf("copyin: missing mapping va=%p\n", va0);
+}
+
+if(pa0 == 0) {
+  struct proc *p = myproc();
+
+  if(lazyalloc(p, va0) < 0)
+    return -1;
+
+  pa0 = walkaddr(pagetable, va0);
+  if(pa0 == 0)
+    return -1;
+}
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
@@ -410,9 +482,18 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+   pa0 = walkaddr(pagetable, va0);
+
+if(pa0 == 0) {
+  struct proc *p = myproc();
+
+  if(lazyalloc(p, va0) < 0)
+    return -1;
+
+  pa0 = walkaddr(pagetable, va0);
+  if(pa0 == 0)
+    return -1;
+}
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;
