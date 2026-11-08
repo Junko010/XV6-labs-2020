@@ -131,7 +131,10 @@ ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
 ifeq ($(LAB),$(filter $(LAB), pgtbl lock))
 ULIB += $U/statistics.o
 endif
-
+$U/_uthread: $U/uthread.o $U/uthread_switch.o $(ULIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $U/uthread.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/uthread.sym
 _%: %.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
 	$(OBJDUMP) -S $@ > $*.asm
@@ -176,6 +179,7 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 	$U/_cowtest\
+	$U/_uthread\
 
 
 
